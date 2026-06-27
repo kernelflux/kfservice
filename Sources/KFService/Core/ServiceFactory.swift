@@ -28,7 +28,7 @@ import Network
 public final class ServiceFactory {
     private static var factories: [Key: () -> Any] = [:]
     private static var instances: [Key: Any] = [:]
-    private static var modules: [(module: any KFModule, priority: Int)] = []
+    private static var modules: [(name: String, priority: Int)] = []
     private static var eventObserverTokens: [NSObjectProtocol] = []
     private static let lock = NSLock()
     private static var isObservingSystemEvents = false
@@ -56,10 +56,10 @@ public final class ServiceFactory {
 
     // MARK: - Module storage (internal)
 
-    static func store(module: any KFModule) {
+    static func store(module: Any, priority: Int = 100) {
         lock.lock()
         defer { lock.unlock() }
-        modules.append((module, module.priority))
+        modules.append((name: "\(type(of: module))", priority: priority))
         modules.sort { $0.priority < $1.priority }
     }
 
@@ -178,10 +178,7 @@ public final class ServiceFactory {
         let reversed = modules.sorted { $0.priority > $1.priority }
         lock.unlock()
 
-        for pair in reversed {
-            pair.module.unregister()
-        }
-
+        // modules no longer have lifecycle callbacks — ModuleProtocol uses performInit
         lock.lock()
         instances.removeAll()
         modules.removeAll()
