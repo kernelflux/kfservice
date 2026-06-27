@@ -63,7 +63,7 @@ public enum Engine {
         ))
 
         delegate?.startupDidUpdatePhase(.executingInit)
-        try await scheduler.executeLayers(layers, stage: .init)
+        try await scheduler.executeLayers(layers, stage: .initialization)
 
         delegate?.startupDidUpdatePhase(.executingStart)
         try await scheduler.executeLayers(layers, stage: .start)

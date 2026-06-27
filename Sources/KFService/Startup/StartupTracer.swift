@@ -45,7 +45,7 @@ public final class StartupTracer: @unchecked Sendable {
 
         let total = snapshot.map(\.duration).reduce(.zero, +)
         let initSpans = snapshot.filter { span in
-            if case .init = span.stage { return true }
+            if case .initialization = span.stage { return true }
             return false
         }
         let startSpans = snapshot.filter { span in

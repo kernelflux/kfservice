@@ -21,7 +21,7 @@ extension ModuleID {
 // MARK: - ActorRequirement
 
 /// 三态 Actor 隔离声明。
-public enum ActorRequirement: Sendable {
+public enum ActorRequirement: Sendable, Equatable {
     /// 必须在 MainActor 上执行（UIKit 依赖）
     case mainActor
     /// 必须在后台线程执行（耗时计算/I/O）

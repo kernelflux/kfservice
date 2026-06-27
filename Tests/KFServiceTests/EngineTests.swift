@@ -46,7 +46,7 @@ final class StartupSchedulerTests: XCTestCase {
 
     func testEmptyLayers() async throws {
         let scheduler = StartupScheduler()
-        try await scheduler.executeLayers([], stage: .init)
+        try await scheduler.executeLayers([], stage: .initialization)
         // should not crash
     }
 
@@ -59,7 +59,7 @@ final class StartupSchedulerTests: XCTestCase {
         }
         let layers = try graph.topologicalSort()
         let scheduler = StartupScheduler()
-        try await scheduler.executeLayers(layers, stage: .init)
+        try await scheduler.executeLayers(layers, stage: .initialization)
         XCTAssertTrue(executed)
     }
 
@@ -78,7 +78,7 @@ final class StartupSchedulerTests: XCTestCase {
         }
         let layers = try graph.topologicalSort()
         let scheduler = StartupScheduler()
-        try await scheduler.executeLayers(layers, stage: .init)
+        try await scheduler.executeLayers(layers, stage: .initialization)
 
         // A must be first
         XCTAssertEqual(order.first, "A")
@@ -93,7 +93,7 @@ final class StartupSchedulerTests: XCTestCase {
         }
         let layers = try graph.topologicalSort()
         let scheduler = StartupScheduler()
-        try await scheduler.executeLayers(layers, stage: .init)
+        try await scheduler.executeLayers(layers, stage: .initialization)
 
         let report = scheduler.tracer.report()
         XCTAssertFalse(report.spans.isEmpty)

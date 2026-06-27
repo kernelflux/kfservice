@@ -12,7 +12,7 @@ actor AsyncSemaphore {
         self.limit = value
     }
 
-    func wait() {
+    func wait() async {
         count += 1
         if count > limit {
             await withCheckedContinuation { continuation in
@@ -34,7 +34,7 @@ actor AsyncSemaphore {
 // MARK: - Stage
 
 public enum Stage: Sendable {
-    case init
+    case initialization
     case start
 }
 
