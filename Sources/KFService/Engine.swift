@@ -46,6 +46,7 @@ public enum Engine {
     }
 
     /// 使用 DAG 图启动（v3 模式）
+    @MainActor
     public static func run(graph: DependencyGraph, config: Config = .init()) async throws {
         delegate?.startupDidUpdatePhase(.validating)
         let cycles = graph.detectCycles()
