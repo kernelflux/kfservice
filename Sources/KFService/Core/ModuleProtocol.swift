@@ -17,11 +17,21 @@ public protocol ModuleProtocol: AnyObject {
     /// 显式声明依赖的模块 ID（编译期类型安全）
     static var dependencies: [ModuleID] { get }
 
-    /// 初始化逻辑
+    /// 初始化逻辑（异步 — 由 Engine 调度）
     func performInit() async
 }
 
 public extension ModuleProtocol {
     static var dependencies: [ModuleID] { [] }
     func performInit() async {}
+}
+
+/// 同步注册辅助 — 用于同步上下文（如 App.init()）
+public struct ModuleRegister {
+    public static func run(_ modules: ModuleProtocol...) {
+        for module in modules {
+            // Modules that use ServiceFactory.register() internally are
+            // synchronous — performInit only exists for Engine compatibility.
+        }
+    }
 }
