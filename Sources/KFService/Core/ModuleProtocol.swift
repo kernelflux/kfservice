@@ -25,13 +25,3 @@ public extension ModuleProtocol {
     static var dependencies: [ModuleID] { [] }
     func performInit() async {}
 }
-
-/// 同步注册辅助 — 用于同步上下文（如 App.init()）
-public struct ModuleRegister {
-    public static func run(_ modules: ModuleProtocol...) {
-        for module in modules {
-            // Modules that use ServiceFactory.register() internally are
-            // synchronous — performInit only exists for Engine compatibility.
-        }
-    }
-}
