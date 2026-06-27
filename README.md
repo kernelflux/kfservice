@@ -1,594 +1,535 @@
 # KFService
 
-A lightweight, protocol-based service manager for iOS — dependency injection, module lifecycle, system event distribution, network path monitoring, and a type-safe EventBus.
+轻量级服务容器 + DAG 启动调度框架，零外部依赖。
 
-Built on two principles: **zero third-party dependencies**, and **explicit over magic** — no code generation, no runtime scanning, no annotation processing.
+```
+Engine（门面层）
+├── ServiceFactory（服务容器层）
+└── StartupScheduler（启动调度层）
+    ├── DependencyGraph（DAG + Kahn's + Tarjan's）
+    └── StartupTracer（性能追踪）
+```
+
+借鉴阿里 BeeHive（3 层分离）、字节跳动抖音（DAG 并行调度）、美团 Kylin（T0 计时）、腾讯微信（超时降级）等行业实践。
 
 [中文文档](README_CN.md)
 
+---
+
 ## Table of Contents
 
-- [Installation](#installation)
-- [Design Rationale](#design-rationale)
-- [Core Concepts](#core-concepts)
-  - [Service Locator vs DI Container](#service-locator-vs-di-container)
-  - [Architecture Overview](#architecture-overview)
+- [Quick Start](#quick-start)
+- [Architecture](#architecture)
+- [Core Types](#core-types)
+- [Module Definition](#module-definition)
 - [Service Registration & Resolution](#service-registration--resolution)
-- [Module System & Lifecycle](#module-system--lifecycle)
-- [System Event Observation](#system-event-observation)
-- [Network Path Monitoring](#network-path-monitoring)
-- [EventBus](#eventbus)
-- [Thread Safety](#thread-safety)
+- [DAG Scheduling](#dag-scheduling)
+- [Threading Model](#threading-model)
+- [Performance Tracing](#performance-tracing)
+- [Migration Guide (v2 → v3)](#migration-guide)
+- [Comparison with Industry](#comparison-with-industry)
 - [Full API Reference](#full-api-reference)
-- [Integration Guide](#integration-guide)
+- [Thread Safety](#thread-safety)
 - [License](#license)
 
-## Installation
-
-**Swift Package Manager**
-
-```
-https://github.com/kernelflux/kfservice.git
-```
-
-Or in `Package.swift`:
-
-```swift
-.package(url: "https://github.com/kernelflux/kfservice.git", from: "1.0.0")
-```
-
-Then add `KFService` to your target's dependencies. Minimum deployment target: iOS 12.0.
-
-> `Network.framework` is auto-linked by the package manifest.
-
 ---
 
-## Design Rationale
+## Quick Start
 
-### Service Locator vs DI Container
-
-Most iOS DI frameworks (Swinject, Typhoon, DIP) are **containers** — you register types and the framework constructs object graphs, injecting dependencies through initializers or properties. This requires either:
-
-- **Code generation** (Swinject + SwinjectAutoregistration, Hilt/Koin for Android)
-- **Reflection** (DIP, old Typhoon)
-- **Complex resolver chains** to satisfy constructor arguments
-
-KFService takes the **service locator** path instead. Reasons:
-
-1. **SDK-grade simplicity** — our target is infrastructure components (logging, KV store, crash reporting), not application-layer DI. These components rarely have deep dependency trees; they need *discovery*, not *construction*.
-
-2. **Explicit control** — the factory closure is hand-written, so initialization order and configuration are visible at the call site. No "magic" resolution of nested dependencies.
-
-3. **Runtime adaptability** — registering a new factory for the same protocol immediately replaces the cached instance. This enables A/B testing, feature flags, and runtime overrides without container rebuilds.
-
-4. **No build phase overhead** — zero code generation keeps build times predictable.
-
-### Architecture Overview
-
-```
-┌─────────────────────────────────────────────────┐
-│                   KFServiceManager               │
-│                                                  │
-│  ┌──────────────┐  ┌──────────────┐              │
-│  │  factories    │  │  instances   │              │
-│  │  [Key: ()->T] │  │  [Key: Any]  │              │
-│  └──────┬───────┘  └──────┬───────┘              │
-│         │                 │                      │
-│         └────────┬────────┘                      │
-│                  │ lock (NSLock)                  │
-│                  ▼                               │
-│  ┌──────────────────────────────┐               │
-│  │  register / resolve / reset  │               │
-│  └──────────────────────────────┘               │
-│                                                  │
-│  ┌──────────────────────┐                       │
-│  │  modules              │                       │
-│  │  [(KFModule, priority)]│                      │
-│  └──────────┬───────────┘                       │
-│             │                                    │
-│  ┌──────────▼───────────┐                       │
-│  │  start() / shutdown() │                      │
-│  └──────────────────────┘                       │
-│                                                  │
-│  ┌─────────────────────────────┐                │
-│  │  eventHandlers               │                │
-│  │  [ObjectIdentifier: [(UUID, │                │
-│  │    (Any)->Void)]]            │                │
-│  └──────────┬──────────────────┘                │
-│             │ eventLock (NSLock)                 │
-│  ┌──────────▼───────────┐                       │
-│  │  on() / emit()        │                       │
-│  └──────────────────────┘                       │
-│                                                  │
-│  ┌──────────────────────────────┐               │
-│  │  System events                │               │
-│  │  NotificationCenter → observe │               │
-│  │  NWPathMonitor → network      │               │
-│  └──────────┬───────────────────┘               │
-│             │                                    │
-│  ┌──────────▼───────────┐                       │
-│  │  dispatchToObservers  │                       │
-│  │  snapshot → iterate   │                       │
-│  └──────────────────────┘                       │
-└─────────────────────────────────────────────────┘
-```
-
-**5 source files, ~400 lines total.** Each subsystem is in a single, self-contained file.
-
----
-
-## Core Concepts
-
-### Registration Key
-
-Service types are identified by `String(reflecting:)`, which produces the fully-qualified type name (module + type). This means `MyApp.KFLogger` and `MyFramework.KFLogger` are distinct keys — no accidental collisions across modules.
+### 1. Define modules with explicit dependencies
 
 ```swift
-private struct Key: Hashable {
-    let label: String
-    init<T>(_ type: T.Type) { self.label = String(reflecting: type) }
+@Module(depends: [])                    // 无依赖
+final class LogModule: ModuleProtocol {
+    func performInit() async {
+        ServiceFactory.register(KFLogger.self) { LogService() }
+    }
+}
+
+@Module(depends: [LogModule.self])      // 编译期类型安全
+final class CrashModule: ModuleProtocol {
+    func performInit() async {
+        ServiceFactory.register(KFCrashService.self) { CrashService() }
+    }
+}
+
+@Module(depends: [LogModule.self], on: .background(.utility))
+final class AnalyticsModule: ModuleProtocol {
+    func performInit() async {
+        await preloadDatasets()  // 后台初始化，不阻塞主线程
+    }
+}
+
+@Module(depends: [], lazy: true)        // 懒加载
+final class SecurityModule: ModuleProtocol {
+    func performInit() async { }
 }
 ```
 
-### Factory Closure & Instance Caching
+### 2. Start in one line
 
-Each registration stores a `() -> T` factory, not an instance. On first `resolve()`, the factory is called, the result is cached in `instances`, and subsequent resolves return the cached value. This is **lazy by default** — services that are never resolved are never constructed.
+```swift
+// App.swift
+try await Engine.run()
+```
 
-`register()` with a new factory for an already-registered type clears the cached instance, so the next `resolve()` constructs a new one with the new factory. This is the mechanism for runtime overrides.
+Or with config and delegate:
+
+```swift
+Engine.delegate = self
+try await Engine.run(config: StartupConfig(
+    maxBackgroundConcurrency: 4,
+    enableTracing: true
+))
+```
+
+### 3. Use services anywhere
+
+```swift
+let log = ServiceFactory.resolve(KFLogger.self)
+log.info("App started")
+let crash = ServiceFactory.resolve((any KFCrashService).self)
+```
+
+**3 行定义模块 → 1 行启动 → 随处使用。**
+
+---
+
+## Architecture
+
+### 3-Layer Separation + Facade
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Facade: Engine                                           │
+│  Engine.run() → 聚合 ServiceFactory + StartupScheduler    │
+└────────────────────────┬─────────────────────────────────┘
+                         │
+         ┌───────────────┴───────────────┐
+         ▼                               ▼
+┌────────────────────┐   ┌──────────────────────────────┐
+│ ServiceFactory      │   │ StartupScheduler              │
+│ register / resolve  │   │ DependencyGraph.sort/layers  │
+│ warmup / preload    │   │ executeLayer → 分层并行       │
+│ EventBus            │   │ StartupTracer                 │
+└────────────────────┘   └──────────────────────────────┘
+         │                          │
+         └──────────┬───────────────┘
+                    ▼
+         ┌────────────────────┐
+         │ ModuleProtocol     │
+         │ @Module(depends:)  │
+         │ (声明层，二者共享)    │
+         └────────────────────┘
+```
+
+### File Structure
+
+```
+Sources/KFService/
+├── Engine.swift                  Facade
+├── Core/
+│   ├── ServiceFactory.swift      服务容器
+│   ├── ModuleProtocol.swift      模块协议
+│   ├── KFEventToken.swift        事件订阅令牌
+│   ├── KFSystemEventObserver.swift 系统事件
+│   └── KFSystemNotifications.swift 通知映射
+└── Startup/
+    ├── DependencyGraph.swift      DAG + Kahn's + Tarjan's
+    ├── StartupScheduler.swift     分层调度器
+    └── StartupTracer.swift        性能追踪
+```
+
+---
+
+## Core Types
+
+### ModuleID
+
+```swift
+public struct ModuleID: Hashable, Sendable {
+    public let rawValue: String
+    public init(_ rawValue: String)
+    public init(_ type: ModuleProtocol.Type)  // 编译期类型安全
+}
+```
+
+### ActorRequirement — 三态线程声明
+
+```swift
+public enum ActorRequirement: Sendable {
+    case mainActor                          // 必须 MainActor
+    case background(DispatchQoS.QoSClass)   // 必须后台
+    case automatic                          // 调度器决定（默认）
+}
+```
+
+### ModuleNode — DAG 节点
+
+```swift
+public struct ModuleNode: Sendable {
+    public let id: ModuleID
+    public let dependencies: [ModuleID]
+    public let factory: @Sendable () async -> Void
+    public let priority: Int
+    public let actorRequirement: ActorRequirement
+    public let maxExecTime: TimeInterval?
+}
+```
+
+### DependencyGraph
+
+```swift
+public struct DependencyGraph: Sendable {
+    /// 构建 DSL
+    public init(@GraphBuilder _ build: () -> [ModuleNode])
+
+    /// Tarjan's SCC 检测循环依赖
+    public func detectCycles() -> [[ModuleID]]
+
+    /// Kahn's 拓扑排序 → 分层并行结构
+    public func topologicalSort() throws -> [[ModuleNode]]
+
+    /// 验证合法性
+    public func validate() throws
+}
+```
+
+---
+
+## Module Definition
+
+### @Module macro (recommended)
+
+```swift
+@Module(depends: [LogModule.self], on: .mainActor, lazy: false)
+final class CrashModule: ModuleProtocol {
+    func performInit() async { ... }
+}
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `depends` | `[ModuleProtocol.Type]` | `[]` | 编译期类型安全的依赖声明 |
+| `on` | `ActorRequirement` | `.automatic` | 线程要求 |
+| `lazy` | `Bool` | `false` | 是否懒加载（首次使用时才初始化） |
+| `maxExecTime` | `TimeInterval?` | `nil` | 超时降级阈值（腾讯模式） |
+
+### ModuleProtocol
+
+```swift
+public protocol ModuleProtocol: AnyObject {
+    static var dependencies: [ModuleID] { get }
+    func performInit() async
+}
+```
+
+### KFModule (v2 compatibility)
+
+The existing `KFModule` protocol is preserved for backward compatibility:
+
+```swift
+public protocol KFModule {
+    var priority: Int { get }
+    func register()
+    func unregister()
+}
+
+ServiceFactory.register(module: myModule)
+```
 
 ---
 
 ## Service Registration & Resolution
 
-### Basic Registration
+### Register a service
 
 ```swift
-// Protocol
-protocol KVStore: AnyObject {
-    func string(forKey key: String) -> String?
-    func set(_ value: String, forKey key: String)
+ServiceFactory.register(KFLogger.self) { LogService() }
+```
+
+### Resolve a service
+
+```swift
+let log = ServiceFactory.resolve(KFLogger.self)
+// fatalError if unregistered
+
+let kv = ServiceFactory.resolveOptional(KVStore.self)
+// nil if unregistered
+```
+
+### Warmup / preload
+
+```swift
+ServiceFactory.warmup(KVStore.self)
+ServiceFactory.preload(KVStore.self, KFLogger.self)
+```
+
+### EventBus
+
+```swift
+// Subscribe (keep token alive)
+let token = ServiceFactory.on(UserLoggedOut.self) { event in
+    // handle event
 }
 
-// Implementation
-class KFKVDefault: KVStore { ... }
-
-// Registration
-KFServiceManager.register(KVStore.self) { KFKVDefault() }
+// Emit
+ServiceFactory.emit(UserLoggedOut(timestamp: Date()))
 ```
 
-The factory is `@escaping` — construction is deferred until first resolve.
-
-### Resolution
+### System Events
 
 ```swift
-// Fatal error if not registered
-let store = KFServiceManager.resolve(KVStore.self)
+class MyService: KFSystemEventObserver {
+    func onEnterBackground() { /* pause work */ }
+    func onEnterForeground() { /* resume work */ }
+    func onMemoryWarning()   { /* flush cache */ }
+    func onWillTerminate()   { /* save state */ }
 
-// nil if not registered (for optional services like analytics)
-let tracker = KFServiceManager.resolveOptional(Analytics.self)
-
-// With default — no fatalError, clean for testing
-let cache = KFServiceManager.resolve(CacheService.self, default: MemoryCache())
+    func onNetworkAvailable()        { /* reconnect */ }
+    func onNetworkUnavailable()      { /* go offline */ }
+    func onNetworkInterfaceChanged(_ interface: KFNetworkInterface) { ... }
+}
 ```
-
-`resolve()` is intentionally strict (`fatalError` on missing registration) — infrastructure services should fail fast at launch, not silently degrade.
-
-### Runtime Override
-
-```swift
-// Register initial implementation
-KFServiceManager.register(KVStore.self) { KFKVDefault() }
-
-// Later: override for testing / A/B test / incident mitigation
-KFServiceManager.register(KVStore.self) { MockKVStore() }
-
-// Next resolve returns MockKVStore
-let store = KFServiceManager.resolve(KVStore.self)
-```
-
-### Eager Initialization
-
-Some services must initialize early — crash reporter (to catch early crashes), logger (to capture boot logs), KV store (to read feature flags before UI).
-
-```swift
-// Single service
-KFServiceManager.warmup(KVStore.self)   // returns the instance
-
-// Batch — caller controls order by listing dependencies first
-KFServiceManager.preload(KVStore.self, KFLogger.self, KFNetwork.self)
-```
-
-`warmup()` is just `resolve()` with `@discardableResult`. `preload()` skips unregistered types silently — safe to call for optional services.
 
 ---
 
-## Module System & Lifecycle
+## DAG Scheduling
 
-### KFModule Protocol
+### Execution Flow
 
-A module is a grouping of related service registrations with lifecycle hooks:
+```
+Phase 1: 验证
+  Tarjan's SCC → 检测强连通分量
+  如果有环 → 报告循环依赖，拒绝启动
+
+Phase 2: 排序
+  Kahn's Algorithm → 分层结构 [[Layer0], [Layer1], ...]
+  同层无依赖，可并行
+
+Phase 3: 执行
+  for each layer:
+    Step 1: MainActor 模块串行（美团模式）
+    Step 2: 后台模块并行（字节模式）
+    Step 3: 超时降级（腾讯模式）
+```
+
+### Lifecycle
 
 ```swift
-public protocol KFModule {
-    var priority: Int { get }       // default: 100 (lower = earlier start)
-    func register()                 // called when module is registered
-    func unregister()               // called during shutdown, reverse priority order
+public protocol StartupDelegate: AnyObject {
+    func startupDidUpdatePhase(_ phase: StartupPhase)
+    func startupDidComplete(with report: StartupReport)
+    func startupDidFail(with error: Error)
 }
 ```
 
-### Priority Semantics
-
-Priority controls both **startup order** (ascending: 100 before 200) and **shutdown order** (descending: 200 before 100). This ensures that foundational services initialize first and tear down last.
-
-| Priority range | Typical use |
-|---------------|-------------|
-| 0–99 | Platform-level: crash reporter, logging, KV store |
-| 100 (default) | General infrastructure |
-| 101–200 | Feature modules, analytics, networking |
+### StartupScheduler
 
 ```swift
-struct KFCrashModule: KFModule {
-    let priority = 10   // very early — must be first to catch crashes
+@MainActor
+public final class StartupScheduler {
+    public init(config: StartupConfig = .default)
+    public func executeLayers(_ layers: [[ModuleNode]], stage: Stage) async throws
+}
+```
 
-    func register() {
-        KFServiceManager.register(KFCrashProtocol.self) { KFCrashDefault.shared }
+### StartupConfig
+
+```swift
+public struct StartupConfig: Sendable {
+    public var maxBackgroundConcurrency: Int  // 默认 4
+}
+```
+
+---
+
+## Threading Model
+
+### Per-Layer Execution
+
+```
+  ┌────────────────────────────────────────┐
+  │ Step 1: MainActor 串行执行              │  ← 美团模式
+  │  同层中按 priority 排序，逐个执行        │     避免 main/bg 竞争
+  ├────────────────────────────────────────┤
+  │ Step 2: 后台模块并行执行                 │  ← 字节模式
+  │  withThrowingTaskGroup 全并行           │
+  │  AsyncSemaphore(max: 4) 控制上限        │
+  ├────────────────────────────────────────┤
+  │ Step 3: 超时降级                        │  ← 腾讯模式
+  │  模块超 maxExecTime → 抛出 timeout     │
+  └────────────────────────────────────────┘
+```
+
+### Visualization
+
+```
+Layer 0:
+  Log_init(main) [30ms] ───────────────────────────
+
+Layer 1 (main串行 ‖ bg并行):
+  KV_init(bg)   [20ms] ────┐
+  Crash_init(main) [50ms] ─┴─┬────────────────────
+                             │
+Layer 2:
+  Analytics_init(bg) [100ms] ┘
+
+关键路径: Log(30) + Crash(50) + Analytics(100) = 180ms
+并行节省: 200ms → 180ms ≈ 10%
+```
+
+---
+
+## Performance Tracing
+
+```swift
+public final class StartupTracer {
+    public func report() -> StartupReport
+}
+
+public struct StartupReport: Sendable {
+    public let totalDuration: Duration
+    public let initDuration: Duration
+    public let startDuration: Duration
+    public let criticalPath: [Span]
+    public let parallelSavings: Double
+    public let bottlenecks: [Span]
+}
+```
+
+Usage:
+
+```swift
+Engine.delegate = self
+try await Engine.run(config: StartupConfig(enableTracing: true))
+
+// In delegate:
+func startupDidComplete(with report: StartupReport) {
+    print("总耗时: \(report.totalDuration)")
+    print("关键路径: \(report.criticalPath)")
+    print("瓶颈: \(report.bottlenecks)")
+}
+```
+
+---
+
+## Migration Guide
+
+### Step 1: Bridge priority → DAG (zero code change)
+
+```swift
+// Before
+ServiceFactory.start()
+
+// After
+let graph = DependencyGraph.fromPriorityModules(ServiceFactory.registeredModules)
+try await Engine.run(graph: graph)
+```
+
+### Step 2: Migrate individual modules
+
+```swift
+// Before
+class LogModule: KFModule {
+    var priority: Int { 100 }
+    func register() { ServiceFactory.register(KFLogger.self) { LogService() } }
+}
+
+// After
+@Module(depends: [])
+final class LogModule: ModuleProtocol {
+    func performInit() async {
+        ServiceFactory.register(KFLogger.self) { LogService() }
     }
-
-    func unregister() {
-        // flush pending crash reports
-        KFServiceManager.resolve(KFCrashProtocol.self).sync()
-    }
-}
-
-struct KFNetworkModule: KFModule {
-    let priority = 300  // late — depends on KV (for base URL config)
-
-    func register() {
-        let baseURL = KFServiceManager.resolve(KVStore.self).string(forKey: "base_url")
-        KFServiceManager.register(APIClient.self) { APIClientDefault(baseURL: baseURL!) }
-    }
 }
 ```
 
-### Registration
+### Step 3: Full migration
 
 ```swift
-// Module registers its services immediately, and is retained for lifecycle
-KFServiceManager.register(module: KFCrashModule())
-KFServiceManager.register(module: KFKVModule())
+// Before
+ServiceFactory.register(module: A)
+ServiceFactory.register(module: B)
+ServiceFactory.start()
+
+// After
+try await Engine.run()
 ```
-
-### Start & Shutdown
-
-```swift
-// Boot: eager-initialize ALL registered services, subscribe to system events,
-// start network monitoring
-KFServiceManager.start()
-
-// Graceful shutdown: reverse-priority unregister → clear instances → clear
-// modules → clear EventBus → stop network monitor → unsubscribe system events
-KFServiceManager.shutdown()
-```
-
-`shutdown()` preserves factory registrations — `start()` can be called again to reinitialize everything.
 
 ---
 
-## System Event Observation
+## Comparison with Industry
 
-`KFSystemEventObserver` is a protocol that services conform to for receiving app lifecycle and network events. All methods have default empty implementations — implement only what your service needs.
-
-```swift
-public protocol KFSystemEventObserver: AnyObject {
-    func onEnterBackground()
-    func onEnterForeground()
-    func onMemoryWarning()
-    func onWillTerminate()
-
-    func onNetworkAvailable()
-    func onNetworkUnavailable()
-    func onNetworkInterfaceChanged(_ interface: KFNetworkInterface)
-}
-```
-
-### How It Works
-
-1. `start()` calls `subscribeSystemEvents()`, which adds block-based observers for 4 UIKit notifications via `NotificationCenter`.
-2. When a notification fires, `dispatchToObservers` snapshots all cached instances under `lock`, then iterates the snapshot outside the lock, calling the callback on any instance that conforms to `KFSystemEventObserver`.
-3. `shutdown()` calls `unsubscribeSystemEvents()`, removing each observer token individually.
-
-Notification names are defined as raw string constants in `Notification.Name.KFSystem` to avoid importing UIKit in the SPM target.
-
-### Usage
-
-```swift
-extension KFLogDefault: KFSystemEventObserver {
-    func onEnterBackground() { flush() }
-    func onMemoryWarning() { flush() }
-}
-```
-
-The observer pattern means **services opt in** — KFServiceManager does not need to know about each service's lifecycle needs. It simply broadcasts events, and each service decides what to do.
-
----
-
-## Network Path Monitoring
-
-KFServiceManager monitors network connectivity using `NWPathMonitor` (iOS 12+) and dispatches changes to `KFSystemEventObserver` instances.
-
-### Interface Types
-
-```swift
-public enum KFNetworkInterface: Sendable {
-    case wifi
-    case cellular
-    case wired
-    case loopback
-    case other
-}
-```
-
-### Deduplication Logic
-
-The monitor tracks `lastNetworkAvailable` and `lastNetworkInterface`. On each path update:
-
-| Condition | Event dispatched |
-|-----------|-----------------|
-| `!available → available` | `onNetworkAvailable()` |
-| `available → !available` | `onNetworkUnavailable()` |
-| Interface change while still available | `onNetworkInterfaceChanged(_:)` |
-| No change | nothing dispatched |
-
-This prevents repeated "available" callbacks that `NWPathMonitor` can produce on transient network changes.
-
-### Threading
-
-The monitor runs on `.global(qos: .default)`. State updates (`lastNetworkAvailable`, `lastNetworkInterface`) happen on the monitor's queue without locking — they are written before `dispatchToObservers` reads them, and the dispatch happens synchronously on the same queue.
-
----
-
-## EventBus
-
-A type-safe, in-process publish/subscribe mechanism for service-layer events. Designed for scenarios like: user logged out, auth token refreshed, entitlement changed, risk assessment triggered.
-
-### Design goals
-
-| Concern | Mechanism |
-|---------|-----------|
-| Memory safety | `KFEventToken` auto-unsubscribes on `deinit` — no forgotten handlers |
-| Performance | Separate `eventLock` from the main service `lock`; handlers snapshotted under lock, invoked outside lock |
-| Type safety | Events keyed by `ObjectIdentifier(T.self)` — no string-based event names |
-| Threading | Handlers called on the **emitting thread** (no implicit queue hop) |
-
-### Subscribe
-
-```swift
-// Define your event
-struct UserLoggedOut {
-    let timestamp: Date
-}
-
-// Subscribe — retain the token
-private var tokens: [KFEventToken] = []
-
-tokens.append(KFServiceManager.on(UserLoggedOut.self) { event in
-    // Clear user-specific caches
-    imageCache.removeAll()
-    // Called on whatever thread emit() was called on
-})
-```
-
-### Emit
-
-```swift
-KFServiceManager.emit(UserLoggedOut(timestamp: Date()))
-```
-
-### Unsubscribe
-
-Two paths:
-
-```swift
-// 1. Automatic — when token is deallocated (owner deinits, or set to nil)
-token = nil
-
-// 2. Explicit — keep the property but cancel immediately
-token.cancel()
-
-// 3. Bulk — shutdown() clears all handlers
-```
-
-### KFEventToken Internals
-
-The token stores a single closure `() -> Void` that captures only the handler ID, not the handler itself. On `deinit`, it acquires `eventLock`, removes the handler by ID from the `eventHandlers` dictionary, and cleans up empty entries. This incurs O(n) per-cancel where n is the handler count for that event type — acceptable since unsubscribe frequency is low relative to emit frequency. Emit is O(1) snapshot.
-
----
-
-## Thread Safety
-
-KFServiceManager uses two independent locks to minimize contention:
-
-| Lock | Protects | Hot path |
-|------|----------|----------|
-| `lock` | `factories`, `instances`, `modules` | `resolve()` — called frequently |
-| `eventLock` | `eventHandlers` | `emit()` — called on business events |
-
-### Resolve hot path
-
-```
-resolve()
-  lock.lock()
-  if cached → return    ← hot path: O(1), lock held for nanoseconds
-  lock.unlock()
-  factory()             ← construction happens OUTSIDE the lock
-  lock.lock()
-  cache instance
-  lock.unlock()
-```
-
-The common case (already cached) is a dictionary lookup under a lock — minimal contention.
-
-### Dispatch pattern
-
-Both system events and EventBus use **snapshot-then-dispatch**:
-
-```
-lock.lock()
-snapshot = collection.copy()
-lock.unlock()
-
-for item in snapshot {
-    callback(item)       // handler runs outside lock — cannot deadlock
-}
-```
-
-This means callbacks that call back into KFServiceManager (e.g., resolving another service) are safe — they won't deadlock on re-entrant lock acquisition because `NSLock` is not recursive and the lock is not held during callback execution.
+| 能力 | KFService v2 | KFService v3 (DAG) | BeeHive | ByteDance | Needle |
+|---|---|---|---|---|---|
+| DAG 依赖解析 | ❌ | ✅ Kahn's + Tarjan's | ❌ priority | ✅ | ✅ 编译期 |
+| 并行初始化 | ❌ 串行 | ✅ 同层并行 | ✅ 手动 async | ✅ | ❌ |
+| 循环依赖检测 | ❌ | ✅ Tarjan's SCC | ❌ | ✅ | ✅ 编译期 |
+| MainActor 隔离 | ❌ | ✅ 三态枚举 | ❌ | ✅ | ❌ |
+| 超时降级 | ❌ | ✅ | ❌ | ❌ | ❌ |
+| 性能追踪 | ❌ | ✅ StartupTracer | ❌ | ✅ | ❌ |
+| 关键路径分析 | ❌ | ✅ DFS 回溯 | ❌ | ❌ | ❌ |
+| 外部依赖 | 0 | 0 | 0 | ~5k | ~10k |
+| 侵入性 | 低 | 低 | 中 | 中 | 高 |
 
 ---
 
 ## Full API Reference
 
-### Registration & Resolution
+### Engine
 
 | Method | Description |
-|--------|-------------|
-| `register(_:factory:)` | Register a factory for a protocol. Replaces existing factory, clears cached instance |
-| `resolve(_:)` | Get or create a cached instance. `fatalError` if not registered |
-| `resolveOptional(_:)` | Get or create a cached instance. Returns `nil` if not registered |
-| `resolve(_:default:)` | Resolve with `@autoclosure` fallback value |
+|---|---|
+| `Engine.run()` | 启动所有模块（v2 兼容模式） |
+| `Engine.run(graph:config:)` | 使用 DAG 启动 |
+| `Engine.delegate` | 启动委托 |
 
-### Module Lifecycle
-
-| Method | Description |
-|--------|-------------|
-| `register(module:)` | Register a `KFModule` — calls `module.register()`, retains for lifecycle |
-| `start()` | Eager-initialize all registrations; subscribe to system events; start network monitor |
-| `shutdown()` | Reverse-priority teardown; clear instances, modules, and event handlers |
-
-### Orchestration
+### ServiceFactory
 
 | Method | Description |
-|--------|-------------|
-| `warmup(_:)` | Eagerly resolve & cache a single service. `@discardableResult` |
-| `preload(_:)` | Batch warmup in caller-specified order. Silently skips unregistered types |
-| `isRegistered(_:)` | Check whether a service type has been registered |
-| `registeredServices` | Sorted array of registered type names (debug/introspection) |
+|---|---|
+| `ServiceFactory.register(_:factory:)` | 注册服务 |
+| `ServiceFactory.resolve<T>(_) -> T` | 获取服务实例 |
+| `ServiceFactory.resolveOptional<T>(_) -> T?` | 安全获取 |
+| `ServiceFactory.warmup<T>(_:)` | 预热单个服务 |
+| `ServiceFactory.preload(_:)` | 批量预热 |
+| `ServiceFactory.register(module:)` | 注册模块（KFModule 兼容） |
+| `ServiceFactory.start()` | 启动所有已注册模块 |
+| `ServiceFactory.shutdown()` | 关闭所有模块 |
+| `ServiceFactory.on<T>(_:handler:) -> KFEventToken` | 订阅事件 |
+| `ServiceFactory.emit<T>(_:)` | 发布事件 |
+| `ServiceFactory.registeredServices` | 已注册服务列表 |
+| `ServiceFactory.resetAll()` | 重置 |
 
-### State Management
+### StartupScheduler
 
 | Method | Description |
-|--------|-------------|
-| `reset(_:)` | Clear cached instance for one service. Next `resolve()` constructs a new one |
-| `resetAll()` | Clear all registrations and cached instances |
+|---|---|
+| `StartupScheduler(config:)` | 创建调度器 |
+| `executeLayers(_:stage:)` | 执行分层调度 |
 
-### EventBus
+### DependencyGraph
 
 | Method | Description |
-|--------|-------------|
-| `on(_:handler:) -> KFEventToken` | Subscribe to an event type. Retain the token to stay subscribed |
-| `emit(_:)` | Send event to all subscribers of its type. Handlers called on current thread |
+|---|---|
+| `DependencyGraph { }` | DSL 构建 |
+| `graph.detectCycles() -> [[ModuleID]]` | Tarjan's 环检测 |
+| `graph.topologicalSort() -> [[ModuleNode]]` | Kahn's 拓扑排序 |
+| `graph.validate()` | 合法性验证 |
+| `DependencyGraph.fromPriorityModules(_:)` | bridge 工具 |
 
 ---
 
-## Integration Guide
+## Thread Safety
 
-### Typical App Launch Sequence
-
-```swift
-// AppDelegate.application(_:didFinishLaunchingWithOptions:)
-
-// Phase 1: Register modules in dependency order
-KFServiceManager.register(module: KFCrashModule())     // priority 10
-KFServiceManager.register(module: KFKVModule())         // priority 100
-KFServiceManager.register(module: KFLogModule())        // priority 200
-KFServiceManager.register(module: KFNetworkModule())    // priority 300
-
-// Phase 2: Manual overrides or conditional registration
-#if DEBUG
-KFServiceManager.register(KVStore.self) { MockKVStore() }
-#endif
-
-// Phase 3: Start the service manager
-KFServiceManager.start()
-```
-
-### Shutdown (optional)
-
-```swift
-// AppDelegate.applicationWillTerminate(_:)
-KFServiceManager.shutdown()
-```
-
-### Using Services in Business Code
-
-```swift
-class UserProfileViewController: UIViewController {
-    // Prefer resolve() for required services — fail fast
-    private let logger = KFServiceManager.resolve(KFLogger.self)
-    private let store  = KFServiceManager.resolve(KVStore.self)
-
-    // Use resolveOptional for optional services
-    private let analytics = KFServiceManager.resolveOptional(Analytics.self)
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        logger.info("profile loaded")
-        analytics?.track(.screenView("profile"))
-    }
-}
-```
-
-### Listening to Events
-
-```swift
-class CartManager {
-    private var tokens: [KFEventToken] = []
-
-    init() {
-        tokens.append(KFServiceManager.on(UserLoggedOut.self) { [weak self] _ in
-            self?.clearCart()
-        })
-        tokens.append(KFServiceManager.on(EntitlementChanged.self) { [weak self] event in
-            self?.refreshPricing(for: event.tier)
-        })
-    }
-
-    // tokens deinit → all handlers auto-removed
-}
-```
-
-### Testing
-
-```swift
-final class MyServiceTests: XCTestCase {
-    override func tearDown() {
-        KFServiceManager.resetAll()
-        super.tearDown()
-    }
-
-    func testWithMock() {
-        KFServiceManager.register(KVStore.self) { MockKVStore() }
-        let store = KFServiceManager.resolve(KVStore.self)
-        // ...
-    }
-}
-```
-
-> Note: `resetAll()` clears registrations but does **not** unsubscribe system events or stop the network monitor. Use `shutdown()` for that.
+- `ServiceFactory` 全部方法线程安全（内部 `NSLock`）
+- `StartupScheduler` 标注 `@MainActor`，调度在 MainActor 上
+- 后台模块通过 `TaskGroup` + `AsyncSemaphore` 控制并发
+- DAG 验证和排序是值类型操作，天然线程安全
 
 ---
-
-## Source Layout
-
-```
-Sources/KFService/
-├── KFServiceManager.swift           — Service locator, lifecycle, system events, network monitor, EventBus
-├── KFModule.swift                   — KFModule protocol + register(module:) extension
-├── KFSystemEventObserver.swift      — Observer protocol + KFNetworkInterface enum
-├── KFSystemNotifications.swift      — UIKit notification name constants (no UIKit import)
-└── KFEventToken.swift               — Auto-unsubscribing subscription token
-```
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2026 KernelFlux
+KernelFlux Internal — MIT License

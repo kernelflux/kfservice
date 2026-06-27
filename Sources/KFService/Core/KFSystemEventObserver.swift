@@ -3,10 +3,10 @@
 import Foundation
 
 /// Conform your service class to this protocol to receive system events
-/// forwarded by KFServiceManager. All methods are optional — implement only
+/// forwarded by ServiceFactory. All methods are optional — implement only
 /// the ones your service needs.
 ///
-/// KFServiceManager subscribes to system notifications and network state
+/// ServiceFactory subscribes to system notifications and network state
 /// changes during `start()` and dispatches them to all cached service
 /// instances that conform to this protocol.
 public protocol KFSystemEventObserver: AnyObject {

@@ -2,7 +2,7 @@
 
 import Foundation
 
-/// Retain this token to keep a KFServiceManager event subscription alive.
+/// Retain this token to keep a ServiceFactory event subscription alive.
 /// When the token is deallocated, the handler is automatically removed —
 /// no need to call a separate "unsubscribe" method.
 ///
@@ -10,7 +10,7 @@ import Foundation
 /// // Keep this alive
 /// private var token: KFEventToken?
 ///
-/// token = KFServiceManager.on(UserLoggedOut.self) { event in
+/// token = ServiceFactory.on(UserLoggedOut.self) { event in
 ///     // handle logout
 /// }
 ///

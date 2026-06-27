@@ -3,25 +3,29 @@
 import Foundation
 import Network
 
-/// Lightweight service manager — protocol-based dependency injection without third-party frameworks.
+/// Lightweight service container — protocol-based dependency injection.
 ///
 /// ```
 /// // Registration (app launch)
-/// KFServiceManager.register(KFLogger.self) { KFLogDefault() }
-/// KFServiceManager.register(KVStore.self)  { KFKVDefault() }
+/// ServiceFactory.register(KFLogger.self) { KFConsoleLogger() }
+/// ServiceFactory.register(KVStore.self)  { KFKVDefault() }
 ///
 /// // Resolution (business code)
-/// let logger = KFServiceManager.resolve(KFLogger.self)
+/// let logger = ServiceFactory.resolve(KFLogger.self)
 /// logger.info("done")
 ///
+/// // Warmup (eager init)
+/// ServiceFactory.warmup(KVStore.self)
+/// ServiceFactory.preload(KVStore.self, KFLogger.self)
+///
 /// // Runtime override (testing / A/B / disaster recovery)
-/// KFServiceManager.register(KFLogger.self) { KFConsoleLogger() }
+/// ServiceFactory.register(KFLogger.self) { KFConsoleLogger() }
 ///
 /// // Eager initialization — forces instantiation now rather than on first resolve
-/// KFServiceManager.warmup(KVStore.self)
-/// KFServiceManager.preload(KVStore.self, KFLogger.self)
+/// ServiceFactory.warmup(KVStore.self)
+/// ServiceFactory.preload(KVStore.self, KFLogger.self)
 /// ```
-public final class KFServiceManager {
+public final class ServiceFactory {
     private static var factories: [Key: () -> Any] = [:]
     private static var instances: [Key: Any] = [:]
     private static var modules: [(module: any KFModule, priority: Int)] = []
@@ -83,7 +87,7 @@ public final class KFServiceManager {
             return instance
         }
         guard let factory = factories[key] else {
-            fatalError("KFServiceManager: no registration for '\(key.label)'. Call register(_:factory:) first.")
+            fatalError("ServiceFactory: no registration for '\(key.label)'. Call register(_:factory:) first.")
         }
         let instance = factory() as! T
         instances[key] = instance as Any
@@ -142,9 +146,9 @@ public final class KFServiceManager {
     /// Subscribes to system events and starts network path monitoring.
     ///
     /// ```
-    /// KFServiceManager.register(module: KFKVModule(...))
-    /// KFServiceManager.register(module: KFLogModule(...))
-    /// KFServiceManager.start()
+    /// ServiceFactory.register(module: KFKVModule(...))
+    /// ServiceFactory.register(module: KFLogModule(...))
+    /// ServiceFactory.start()
     /// ```
     public static func start() {
         lock.lock()
@@ -286,7 +290,7 @@ public final class KFServiceManager {
     /// ```
     /// private var tokens: [KFEventToken] = []
     ///
-    /// tokens.append(KFServiceManager.on(UserLoggedOut.self) { event in
+    /// tokens.append(ServiceFactory.on(UserLoggedOut.self) { event in
     ///     // handle logout — called on the emitting thread
     /// })
     /// ```
@@ -315,7 +319,7 @@ public final class KFServiceManager {
     /// Handlers are called on the emitting thread.
     ///
     /// ```
-    /// KFServiceManager.emit(UserLoggedOut(timestamp: Date()))
+    /// ServiceFactory.emit(UserLoggedOut(timestamp: Date()))
     /// ```
     public static func emit<T>(_ event: T) {
         let key = ObjectIdentifier(T.self)
