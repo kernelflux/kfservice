@@ -2,31 +2,42 @@ import Foundation
 
 // MARK: - Simple AsyncSemaphore
 
-/// A simple async semaphore for controlling concurrency.
-actor AsyncSemaphore {
+/// A simple semaphore for controlling concurrency (iOS 16 compatible).
+final class AsyncSemaphore: @unchecked Sendable {
     private let limit: Int
     private var count = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private let lock = NSLock()
 
     init(value: Int) {
         self.limit = value
     }
 
     func wait() async {
+        lock.lock()
         count += 1
         if count > limit {
+            lock.unlock()
             await withCheckedContinuation { continuation in
+                lock.lock()
                 waiters.append(continuation)
+                lock.unlock()
             }
+        } else {
+            lock.unlock()
         }
     }
 
     func signal() {
+        lock.lock()
         count -= 1
         if count < 0 { count = 0 }
         if let next = waiters.first {
             waiters.removeFirst()
+            lock.unlock()
             next.resume()
+        } else {
+            lock.unlock()
         }
     }
 }
@@ -88,7 +99,7 @@ public final class StartupScheduler {
         }
 
         // Step 2: 后台并行
-        try await withThrowingDiscardingTaskGroup { group in
+        try await withThrowingTaskGroup(of: Void.self) { group in
             for node in nodes.filter({ $0.actorRequirement != .mainActor }) {
                 group.addTask {
                     await self.bgSemaphore.wait()
@@ -96,6 +107,7 @@ public final class StartupScheduler {
                     try await self.executeWithTimeout(node, stage: stage, executor: .background)
                 }
             }
+            try await group.waitForAll()
         }
     }
 
