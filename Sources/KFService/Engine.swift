@@ -45,9 +45,15 @@ public enum Engine {
         delegate?.startupDidUpdatePhase(.startupCompleted)
     }
 
-    /// 启动所有已注册模块（v2 兼容模式 + 配置）
-    public static func run(config: Config = .init()) async throws {
-        try await run()
+    /// 启动所有已注册模块（v2 + 配置 + 委托）
+    public static func run(
+        config: Config = .init(),
+        delegate: StartupDelegate? = nil
+    ) async throws {
+        if let delegate { Engine.delegate = delegate }
+        delegate?.startupDidUpdatePhase(.startupStarted)
+        ServiceFactory.start()
+        delegate?.startupDidUpdatePhase(.startupCompleted)
         if config.enableTracing {
             let report = StartupTracer().report()
             delegate?.startupDidComplete(with: report)
