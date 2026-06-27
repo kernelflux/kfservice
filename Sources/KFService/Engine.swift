@@ -38,11 +38,20 @@ public enum Engine {
         }
     }
 
-    /// 启动所有已注册模块（v2 兼容：调用 ServiceFactory 的 priority 排序流程）
+    /// 启动所有已注册模块（v2 兼容模式）
     public static func run() async throws {
         delegate?.startupDidUpdatePhase(.startupStarted)
         ServiceFactory.start()
         delegate?.startupDidUpdatePhase(.startupCompleted)
+    }
+
+    /// 启动所有已注册模块（v2 兼容模式 + 配置）
+    public static func run(config: Config = .init()) async throws {
+        try await run()
+        if config.enableTracing {
+            let report = StartupTracer().report()
+            delegate?.startupDidComplete(with: report)
+        }
     }
 
     /// 使用 DAG 图启动（v3 模式）
