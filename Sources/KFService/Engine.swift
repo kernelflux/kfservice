@@ -60,9 +60,14 @@ public enum Engine {
         }
     }
 
-    /// 使用 DAG 图启动（v3 模式）
+    /// 使用 DAG 图启动（v3 模式 + 委托）
     @MainActor
-    public static func run(graph: DependencyGraph, config: Config = .init()) async throws {
+    public static func run(
+        graph: DependencyGraph,
+        config: Config = .init(),
+        delegate: StartupDelegate? = nil
+    ) async throws {
+        if let delegate { Engine.delegate = delegate }
         delegate?.startupDidUpdatePhase(.validating)
         let cycles = graph.detectCycles()
         if !cycles.isEmpty {
