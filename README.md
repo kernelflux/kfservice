@@ -1,16 +1,16 @@
 # KFService
 
-轻量级服务容器 + DAG 启动调度框架，零外部依赖。
+A lightweight service container + DAG-based startup scheduler. Zero external dependencies.
 
 ```
-Engine（门面层）
-├── ServiceFactory（服务容器层）
-└── StartupScheduler（启动调度层）
-    ├── DependencyGraph（DAG + Kahn's + Tarjan's）
-    └── StartupTracer（性能追踪）
+Engine (Facade)
+├── ServiceFactory (Service Container)
+└── StartupScheduler (Startup Scheduler)
+    ├── DependencyGraph (DAG + Kahn's + Tarjan's)
+    └── StartupTracer (Performance Tracing)
 ```
 
-借鉴阿里 BeeHive（3 层分离）、字节跳动抖音（DAG 并行调度）、美团 Kylin（T0 计时）、腾讯微信（超时降级）等行业实践。
+Inspired by Alibaba BeeHive (3-layer separation), ByteDance Douyin (DAG parallel scheduling), Meituan Kylin (T0 timing), and Tencent WeChat (timeout degradation).
 
 [中文文档](README_CN.md)
 
@@ -39,14 +39,14 @@ Engine（门面层）
 ### 1. Define modules with explicit dependencies
 
 ```swift
-@Module(depends: [])                    // 无依赖
+@Module(depends: [])                    // no dependencies
 final class LogModule: ModuleProtocol {
     func performInit() async {
         ServiceFactory.register(KFLogger.self) { LogService() }
     }
 }
 
-@Module(depends: [LogModule.self])      // 编译期类型安全
+@Module(depends: [LogModule.self])      // compile-time type safety
 final class CrashModule: ModuleProtocol {
     func performInit() async {
         ServiceFactory.register(KFCrashService.self) { CrashService() }
@@ -56,11 +56,11 @@ final class CrashModule: ModuleProtocol {
 @Module(depends: [LogModule.self], on: .background(.utility))
 final class AnalyticsModule: ModuleProtocol {
     func performInit() async {
-        await preloadDatasets()  // 后台初始化，不阻塞主线程
+        await preloadDatasets()  // background init, won't block main thread
     }
 }
 
-@Module(depends: [], lazy: true)        // 懒加载
+@Module(depends: [], lazy: true)        // lazy loading
 final class SecurityModule: ModuleProtocol {
     func performInit() async { }
 }
@@ -91,7 +91,7 @@ log.info("App started")
 let crash = ServiceFactory.resolve((any KFCrashService).self)
 ```
 
-**3 行定义模块 → 1 行启动 → 随处使用。**
+**3 lines to define modules → 1 line to start → use anywhere.**
 
 ---
 
@@ -102,7 +102,7 @@ let crash = ServiceFactory.resolve((any KFCrashService).self)
 ```
 ┌──────────────────────────────────────────────────────────┐
 │  Facade: Engine                                           │
-│  Engine.run() → 聚合 ServiceFactory + StartupScheduler    │
+│  Engine.run() → orchestrates ServiceFactory + StartupScheduler    │
 └────────────────────────┬─────────────────────────────────┘
                          │
          ┌───────────────┴───────────────┐
@@ -129,15 +129,15 @@ let crash = ServiceFactory.resolve((any KFCrashService).self)
 Sources/KFService/
 ├── Engine.swift                  Facade
 ├── Core/
-│   ├── ServiceFactory.swift      服务容器
-│   ├── ModuleProtocol.swift      模块协议
+│   ├── ServiceFactory.swift      (Container)
+│   ├── ModuleProtocol.swift      (Protocol)
 │   ├── KFEventToken.swift        事件订阅令牌
 │   ├── KFSystemEventObserver.swift 系统事件
-│   └── KFSystemNotifications.swift 通知映射
+│   └── KFSystemNotifications.swift
 └── Startup/
-    ├── DependencyGraph.swift      DAG + Kahn's + Tarjan's
-    ├── StartupScheduler.swift     分层调度器
-    └── StartupTracer.swift        性能追踪
+    ├── DependencyGraph.swift      (DAG + Kahn + Tarjan)
+    ├── StartupScheduler.swift      (Scheduler)
+    └── StartupTracer.swift        (Tracing)
 ```
 
 ---
@@ -150,21 +150,21 @@ Sources/KFService/
 public struct ModuleID: Hashable, Sendable {
     public let rawValue: String
     public init(_ rawValue: String)
-    public init(_ type: ModuleProtocol.Type)  // 编译期类型安全
+    public init(_ type: ModuleProtocol.Type)  // compile-time type-safe
 }
 ```
 
-### ActorRequirement — 三态线程声明
+### ActorRequirement — Tri-State Thread Declaration
 
 ```swift
 public enum ActorRequirement: Sendable {
-    case mainActor                          // 必须 MainActor
-    case background(DispatchQoS.QoSClass)   // 必须后台
-    case automatic                          // 调度器决定（默认）
+    case mainActor                          // must run on MainActor
+    case background(DispatchQoS.QoSClass)   // must run in background
+    case automatic                          // scheduler decides (default)
 }
 ```
 
-### ModuleNode — DAG 节点
+### ModuleNode — DAG Node
 
 ```swift
 public struct ModuleNode: Sendable {
@@ -181,16 +181,16 @@ public struct ModuleNode: Sendable {
 
 ```swift
 public struct DependencyGraph: Sendable {
-    /// 构建 DSL
+    /// DSL builder
     public init(@GraphBuilder _ build: () -> [ModuleNode])
 
-    /// Tarjan's SCC 检测循环依赖
+    /// Tarjan's SCC cycle detection
     public func detectCycles() -> [[ModuleID]]
 
-    /// Kahn's 拓扑排序 → 分层并行结构
+    /// Kahn's topological sort → layered parallel structure
     public func topologicalSort() throws -> [[ModuleNode]]
 
-    /// 验证合法性
+    /// Validate graph
     public func validate() throws
 }
 ```
@@ -210,10 +210,10 @@ final class CrashModule: ModuleProtocol {
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `depends` | `[ModuleProtocol.Type]` | `[]` | 编译期类型安全的依赖声明 |
-| `on` | `ActorRequirement` | `.automatic` | 线程要求 |
-| `lazy` | `Bool` | `false` | 是否懒加载（首次使用时才初始化） |
-| `maxExecTime` | `TimeInterval?` | `nil` | 超时降级阈值（腾讯模式） |
+| `depends` | `[ModuleProtocol.Type]` | `[]` | Compile-time type-safe dependencies |
+| `on` | `ActorRequirement` | `.automatic` | Thread requirement |
+| `lazy` | `Bool` | `false` | Lazy load on first use |
+| `maxExecTime` | `TimeInterval?` | `nil` | Timeout degradation threshold |
 
 ### ModuleProtocol
 
@@ -299,19 +299,19 @@ class MyService: KFSystemEventObserver {
 ### Execution Flow
 
 ```
-Phase 1: 验证
-  Tarjan's SCC → 检测强连通分量
-  如果有环 → 报告循环依赖，拒绝启动
+Phase 1: Validate
+  Tarjan's SCC → detect strongly connected components
+  If cycles found → report and abort
 
-Phase 2: 排序
-  Kahn's Algorithm → 分层结构 [[Layer0], [Layer1], ...]
-  同层无依赖，可并行
+Phase 2: Sort
+  Kahn's Algorithm → layered output [[Layer0], [Layer1], ...]
+  Modules in same layer have no dependencies → can run in parallel
 
-Phase 3: 执行
+Phase 3: Execute
   for each layer:
-    Step 1: MainActor 模块串行（美团模式）
-    Step 2: 后台模块并行（字节模式）
-    Step 3: 超时降级（腾讯模式）
+    Step 1: MainActor modules serially (Meituan pattern)
+    Step 2: Background modules in parallel (ByteDance pattern)
+    Step 3: Timeout degradation (Tencent pattern)
 ```
 
 ### Lifecycle
@@ -350,15 +350,15 @@ public struct StartupConfig: Sendable {
 
 ```
   ┌────────────────────────────────────────┐
-  │ Step 1: MainActor 串行执行              │  ← 美团模式
-  │  同层中按 priority 排序，逐个执行        │     避免 main/bg 竞争
+  │ Step 1: MainActor serial execution          │  ← Meituan pattern
+  │  Modules sorted by priority, executed one by one  │  Avoid main/bg contention
   ├────────────────────────────────────────┤
   │ Step 2: 后台模块并行执行                 │  ← 字节模式
-  │  withThrowingTaskGroup 全并行           │
-  │  AsyncSemaphore(max: 4) 控制上限        │
+  │  withThrowingTaskGroup parallel execution  │
+  │  AsyncSemaphore(max: 4) as upper limit     │
   ├────────────────────────────────────────┤
-  │ Step 3: 超时降级                        │  ← 腾讯模式
-  │  模块超 maxExecTime → 抛出 timeout     │
+  │ Step 3: Timeout degradation                │  ← Tencent pattern
+  │  Module exceeds maxExecTime → throws timeout │
   └────────────────────────────────────────┘
 ```
 
@@ -368,15 +368,15 @@ public struct StartupConfig: Sendable {
 Layer 0:
   Log_init(main) [30ms] ───────────────────────────
 
-Layer 1 (main串行 ‖ bg并行):
+Layer 1 (main serial ‖ bg parallel):
   KV_init(bg)   [20ms] ────┐
   Crash_init(main) [50ms] ─┴─┬────────────────────
                              │
 Layer 2:
   Analytics_init(bg) [100ms] ┘
 
-关键路径: Log(30) + Crash(50) + Analytics(100) = 180ms
-并行节省: 200ms → 180ms ≈ 10%
+Critical path: Log(30) + Crash(50) + Analytics(100) = 180ms
+Parallel savings: 200ms → 180ms ≈ 10%
 ```
 
 ---
@@ -463,15 +463,15 @@ try await Engine.run()
 
 | 能力 | KFService v2 | KFService v3 (DAG) | BeeHive | ByteDance | Needle |
 |---|---|---|---|---|---|
-| DAG 依赖解析 | ❌ | ✅ Kahn's + Tarjan's | ❌ priority | ✅ | ✅ 编译期 |
-| 并行初始化 | ❌ 串行 | ✅ 同层并行 | ✅ 手动 async | ✅ | ❌ |
-| 循环依赖检测 | ❌ | ✅ Tarjan's SCC | ❌ | ✅ | ✅ 编译期 |
-| MainActor 隔离 | ❌ | ✅ 三态枚举 | ❌ | ✅ | ❌ |
+| DAG 依赖解析 | ❌ | ✅ Kahn's + Tarjan's | ❌ priority | ✅ | ✅ compile-time |
+| 并行初始化 | ❌ serial | ✅ 同层并行 | ✅ manual async | ✅ | ❌ |
+| 循环依赖检测 | ❌ | ✅ Tarjan's SCC | ❌ | ✅ | ✅ compile-time |
+| MainActor 隔离 | ❌ | ✅ tri-state enum | ❌ | ✅ | ❌ |
 | 超时降级 | ❌ | ✅ | ❌ | ❌ | ❌ |
 | 性能追踪 | ❌ | ✅ StartupTracer | ❌ | ✅ | ❌ |
 | 关键路径分析 | ❌ | ✅ DFS 回溯 | ❌ | ❌ | ❌ |
 | 外部依赖 | 0 | 0 | 0 | ~5k | ~10k |
-| 侵入性 | 低 | 低 | 中 | 中 | 高 |
+| Invasiveness | Low | Low | Medium | Medium | High |
 
 ---
 
@@ -481,55 +481,55 @@ try await Engine.run()
 
 | Method | Description |
 |---|---|
-| `Engine.run()` | 启动所有模块（v2 兼容模式） |
-| `Engine.run(graph:config:)` | 使用 DAG 启动 |
-| `Engine.delegate` | 启动委托 |
+| `Engine.run()` | Start all modules (v2 compatible) |
+| `Engine.run(graph:config:)` | Start with DAG |
+| `Engine.delegate` | Startup delegate |
 
 ### ServiceFactory
 
 | Method | Description |
 |---|---|
-| `ServiceFactory.register(_:factory:)` | 注册服务 |
-| `ServiceFactory.resolve<T>(_) -> T` | 获取服务实例 |
-| `ServiceFactory.resolveOptional<T>(_) -> T?` | 安全获取 |
-| `ServiceFactory.warmup<T>(_:)` | 预热单个服务 |
-| `ServiceFactory.preload(_:)` | 批量预热 |
-| `ServiceFactory.register(module:)` | 注册模块（KFModule 兼容） |
-| `ServiceFactory.start()` | 启动所有已注册模块 |
-| `ServiceFactory.shutdown()` | 关闭所有模块 |
-| `ServiceFactory.on<T>(_:handler:) -> KFEventToken` | 订阅事件 |
-| `ServiceFactory.emit<T>(_:)` | 发布事件 |
-| `ServiceFactory.registeredServices` | 已注册服务列表 |
-| `ServiceFactory.resetAll()` | 重置 |
+| `ServiceFactory.register(_:factory:)` | Register a service |
+| `ServiceFactory.resolve<T>(_) -> T` | Resolve service instance |
+| `ServiceFactory.resolveOptional<T>(_) -> T?` | Safe resolve |
+| `ServiceFactory.warmup<T>(_:)` | Warmup a service |
+| `ServiceFactory.preload(_:)` | Batch warmup |
+| `ServiceFactory.register(module:)` | Register a module (KFModule) |
+| `ServiceFactory.start()` | Start all registered modules |
+| `ServiceFactory.shutdown()` | Shutdown all modules |
+| `ServiceFactory.on<T>(_:handler:) -> KFEventToken` | Subscribe to event |
+| `ServiceFactory.emit<T>(_:)` | Emit event |
+| `ServiceFactory.registeredServices` | List of registered services |
+| `ServiceFactory.resetAll()` | Reset all |
 
 ### StartupScheduler
 
 | Method | Description |
 |---|---|
-| `StartupScheduler(config:)` | 创建调度器 |
-| `executeLayers(_:stage:)` | 执行分层调度 |
+| `StartupScheduler(config:)` | Create scheduler |
+| `executeLayers(_:stage:)` | Execute layered scheduling |
 
 ### DependencyGraph
 
 | Method | Description |
 |---|---|
-| `DependencyGraph { }` | DSL 构建 |
-| `graph.detectCycles() -> [[ModuleID]]` | Tarjan's 环检测 |
-| `graph.topologicalSort() -> [[ModuleNode]]` | Kahn's 拓扑排序 |
-| `graph.validate()` | 合法性验证 |
-| `DependencyGraph.fromPriorityModules(_:)` | bridge 工具 |
+| `DependencyGraph { }` | DSL builder |
+| `graph.detectCycles() -> [[ModuleID]]` | Tarjan's cycle detection |
+| `graph.topologicalSort() -> [[ModuleNode]]` | Kahn's topological sort |
+| `graph.validate()` | Validate graph |
+| `DependencyGraph.fromPriorityModules(_:)` | Bridge utility |
 
 ---
 
 ## Thread Safety
 
-- `ServiceFactory` 全部方法线程安全（内部 `NSLock`）
-- `StartupScheduler` 标注 `@MainActor`，调度在 MainActor 上
-- 后台模块通过 `TaskGroup` + `AsyncSemaphore` 控制并发
-- DAG 验证和排序是值类型操作，天然线程安全
+- `ServiceFactory` is thread-safe (backed by `NSLock`)
+- `StartupScheduler` is `@MainActor`-isolated
+- Background modules use `TaskGroup` + `AsyncSemaphore` for concurrency control
+- DAG validation and sorting are value-type operations, naturally thread-safe
 
 ---
 
 ## License
 
-KernelFlux Internal — MIT License
+KernelFlux Internal - MIT License

@@ -12,5 +12,9 @@ let package = Package(
             name: "KFService",
             linkerSettings: [.linkedFramework("Network")]
         ),
+        .testTarget(
+            name: "KFServiceTests",
+            dependencies: ["KFService"]
+        ),
     ]
 )
