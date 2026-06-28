@@ -1,44 +1,48 @@
 import Foundation
+import os
 
 // MARK: - Simple AsyncSemaphore
 
 /// A simple semaphore for controlling concurrency (iOS 16 compatible).
+///
+/// Uses `OSAllocatedUnfairLock` for Sendable safety.
+/// Remains `@unchecked Sendable` because `CheckedContinuation`
+/// is not Sendable in Swift 5.9.
 final class AsyncSemaphore: @unchecked Sendable {
     private let limit: Int
-    private var count = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-    private let lock = NSLock()
+
+    private struct State {
+        var count = 0
+        var waiters: [CheckedContinuation<Void, Never>] = []
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     init(value: Int) {
         self.limit = value
     }
 
     func wait() async {
-        lock.lock()
-        count += 1
-        if count > limit {
-            lock.unlock()
+        let shouldSuspend = state.withLock { s -> Bool in
+            s.count += 1
+            return s.count > limit
+        }
+        if shouldSuspend {
             await withCheckedContinuation { continuation in
-                lock.lock()
-                waiters.append(continuation)
-                lock.unlock()
+                state.withLock { $0.waiters.append(continuation) }
             }
-        } else {
-            lock.unlock()
         }
     }
 
     func signal() {
-        lock.lock()
-        count -= 1
-        if count < 0 { count = 0 }
-        if let next = waiters.first {
-            waiters.removeFirst()
-            lock.unlock()
-            next.resume()
-        } else {
-            lock.unlock()
+        let next = state.withLock { s -> CheckedContinuation<Void, Never>? in
+            s.count -= 1
+            if s.count < 0 { s.count = 0 }
+            guard let first = s.waiters.first else { return nil }
+            s.waiters.removeFirst()
+            return first
         }
+        next?.resume()
     }
 }
 
@@ -70,7 +74,10 @@ public enum ExecutorKind: Sendable {
 
 // MARK: - StartupScheduler
 
-/// 启动调度器：分层并行执行 + 超时降级。
+/// Startup scheduler: layered parallel execution with timeout degradation.
+///
+/// A task failure only skips its dependents — non-dependent tasks continue.
+/// All failures are collected and surfaced in the final `StartupReport`.
 @MainActor
 public final class StartupScheduler {
 
@@ -79,57 +86,109 @@ public final class StartupScheduler {
 
     private let bgSemaphore: AsyncSemaphore
 
+    private struct DegradationState {
+        var failedIDs: Set<ModuleID> = []
+    }
+    private let degradationState = OSAllocatedUnfairLock(initialState: DegradationState())
+
     public init(config: StartupConfig = .default) {
         self.config = config
         self.bgSemaphore = AsyncSemaphore(value: config.maxBackgroundConcurrency)
     }
 
-    /// 逐层执行（同层内 MainActor 串行 + 后台并行）。
-    public func executeLayers(_ layers: [[ModuleNode]], stage: Stage) async throws {
-        for layer in layers {
-            try await executeLayer(layer, stage: stage)
+    /// Execute all layers, collecting failures.
+    public func executeLayers(_ layers: [[ModuleNode]], stage: Stage) async -> [StartupFailure] {
+        var allFailures: [StartupFailure] = []
+        for (index, layer) in layers.enumerated() {
+            let failures = await executeLayer(layer, layerIndex: index, stage: stage)
+            allFailures.append(contentsOf: failures)
         }
+        return allFailures
     }
 
-    private func executeLayer(_ nodes: [ModuleNode], stage: Stage) async throws {
-        // Step 1: MainActor 串行
+    /// Execute one layer: MainActor serial → background parallel.
+    /// Returns failures instead of throwing so degradation keeps the startup going.
+    public func executeLayer(_ nodes: [ModuleNode], layerIndex: Int, stage: Stage) async -> [StartupFailure] {
+        var failures: [StartupFailure] = []
+
+        // Step 1: MainActor serial (sorted by priority)
         for node in nodes.filter({ $0.actorRequirement == .mainActor })
             .sorted(by: { $0.priority < $1.priority }) {
-            try await executeWithTimeout(node, stage: stage, executor: .mainActor)
+            if let failure = await executeNode(node, layerIndex: layerIndex, stage: stage) {
+                failures.append(failure)
+            }
         }
 
-        // Step 2: 后台并行
-        try await withThrowingTaskGroup(of: Void.self) { group in
+        // Step 2: Background parallel
+        await withTaskGroup(of: [StartupFailure].self) { group in
             for node in nodes.filter({ $0.actorRequirement != .mainActor }) {
                 group.addTask {
                     await self.bgSemaphore.wait()
                     defer { self.bgSemaphore.signal() }
-                    try await self.executeWithTimeout(node, stage: stage, executor: .background)
+                    if let failure = await self.executeNode(node, layerIndex: layerIndex, stage: stage) {
+                        return [failure]
+                    }
+                    return []
                 }
             }
-            try await group.waitForAll()
+            for await result in group {
+                failures.append(contentsOf: result)
+            }
         }
+
+        return failures
     }
 
-    private func executeWithTimeout(
-        _ node: ModuleNode, stage: Stage, executor: ExecutorKind
-    ) async throws {
-        tracer.begin(node.id, stage: stage)
-
-        if let maxTime = node.maxExecTime {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { await node.factory() }
-                group.addTask {
-                    try await Task.sleep(for: .seconds(maxTime))
-                    throw StartupError.timeout(node.id, maxTime)
-                }
-                try await group.next()
-                group.cancelAll()
-            }
-        } else {
-            await node.factory()
+    /// Execute a single node with degradation:
+    /// - Skip if a dependency already failed
+    /// - Catch errors and record as failures
+    /// Returns nil on success, or a StartupFailure.
+    private func executeNode(_ node: ModuleNode, layerIndex: Int, stage: Stage) async -> StartupFailure? {
+        // Check if any dependency failed — skip if so
+        let depsFailed = degradationState.withLock { state in
+            state.failedIDs.intersection(node.dependencies)
+        }
+        if !depsFailed.isEmpty {
+            return StartupFailure(
+                moduleID: node.id,
+                error: StartupError.initFailed(node.id,
+                    NSError(domain: "KFService", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey:
+                                "Skipped: dependency failed — \(depsFailed.map(\.rawValue).joined(separator: ", "))"])),
+                kind: .skippedDueToFailedDependency
+            )
         }
 
-        tracer.end(node.id, stage: stage)
+        tracer.begin(node.id, stage: stage, layerIndex: layerIndex,
+                     actorRequirement: node.actorRequirement)
+
+        do {
+            if let maxTime = node.maxExecTime {
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask { try await node.factory() }
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(maxTime))
+                        throw StartupError.timeout(node.id, maxTime)
+                    }
+                    try await group.next()
+                    group.cancelAll()
+                }
+            } else {
+                try await node.factory()
+            }
+            tracer.end(node.id, stage: stage)
+            return nil
+        } catch let error as StartupError {
+            _ = degradationState.withLock { $0.failedIDs.insert(node.id) }
+            tracer.end(node.id, stage: stage)
+            if case .timeout = error {
+                return StartupFailure(moduleID: node.id, error: error, kind: .timedOut)
+            }
+            return StartupFailure(moduleID: node.id, error: error, kind: .executionFailed)
+        } catch {
+            _ = degradationState.withLock { $0.failedIDs.insert(node.id) }
+            tracer.end(node.id, stage: stage)
+            return StartupFailure(moduleID: node.id, error: error, kind: .executionFailed)
+        }
     }
 }

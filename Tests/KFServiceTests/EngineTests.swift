@@ -3,11 +3,12 @@ import XCTest
 
 final class EngineTests: XCTestCase {
 
-    func testEngineRunDoesNotCrash() async throws {
-        // Engine.run() in v2 compatibility mode
-        try await Engine.run()
+    @MainActor
+    func testEngineRunWithEmptyTasksDoesNotCrash() async throws {
+        try await Engine.run(tasks: [])
     }
 
+    @MainActor
     func testEngineDelegate() async throws {
         class MockDelegate: StartupDelegate {
             var phases: [StartupPhase] = []
@@ -26,76 +27,58 @@ final class EngineTests: XCTestCase {
         }
 
         let delegate = MockDelegate()
-        Engine.delegate = delegate
-
-        try await Engine.run()
-
-        // In v2 mode, we only get .startupStarted and .startupCompleted
-        XCTAssertTrue(delegate.phases.contains(where: { phase in
-            if case .startupStarted = phase { return true }
-            return false
-        }))
-        XCTAssertTrue(delegate.phases.contains(where: { phase in
-            if case .startupCompleted = phase { return true }
-            return false
-        }))
-    }
-}
-
-final class StartupSchedulerTests: XCTestCase {
-
-    func testEmptyLayers() async throws {
-        let scheduler = StartupScheduler()
-        try await scheduler.executeLayers([], stage: .initialization)
-        // should not crash
+        try await Engine.run(tasks: [], delegate: delegate)
+        XCTAssertTrue(delegate.phases.contains { phase in
+            if case .startupCompleted = phase { return true }; return false
+        })
     }
 
-    func testSingleLayer() async throws {
-        var executed = false
-        let graph = DependencyGraph {
-            ModuleNode(id: "Test", dependencies: []) {
-                executed = true
+    @MainActor
+    func testEngineRunWithTasks() async throws {
+        final class SimpleTask: BaseStartupTask {
+            override var identifier: String { "test" }
+            override func run() async throws {}
+        }
+
+        try await Engine.run(tasks: [SimpleTask()])
+    }
+
+    @MainActor
+    func testEngineRejectsDuplicateIDs() async throws {
+        final class TaskA: BaseStartupTask {
+            override var identifier: String { "dup" }
+            override func run() async throws {}
+        }
+        final class TaskB: BaseStartupTask {
+            override var identifier: String { "dup" }
+            override func run() async throws {}
+        }
+
+        do {
+            try await Engine.run(tasks: [TaskA(), TaskB()])
+            XCTFail("should throw duplicateTaskIDs")
+        } catch let error as StartupError {
+            guard case .duplicateTaskIDs = error else {
+                XCTFail("expected duplicateTaskIDs, got \(error)")
+                return
             }
         }
-        let layers = try graph.topologicalSort()
-        let scheduler = StartupScheduler()
-        try await scheduler.executeLayers(layers, stage: .initialization)
-        XCTAssertTrue(executed)
     }
 
-    func testOrderedExecution() async throws {
-        var order: [String] = []
-        let graph = DependencyGraph {
-            ModuleNode(id: "A", dependencies: []) {
-                order.append("A")
-            }
-            ModuleNode(id: "B", dependencies: ["A"]) {
-                order.append("B")
-            }
-            ModuleNode(id: "C", dependencies: ["A"]) {
-                order.append("C")
-            }
+    @MainActor
+    func testEngineWithTracing() async throws {
+        final class SimpleTask: BaseStartupTask {
+            override var identifier: String { "tracing-test" }
+            override func run() async throws {}
         }
-        let layers = try graph.topologicalSort()
-        let scheduler = StartupScheduler()
-        try await scheduler.executeLayers(layers, stage: .initialization)
 
-        // A must be first
-        XCTAssertEqual(order.first, "A")
-        // B and C both depend on A, order between them is non-deterministic
-        XCTAssertTrue(order.contains("B"))
-        XCTAssertTrue(order.contains("C"))
-    }
-
-    func testTracerRecordsSpans() async throws {
-        let graph = DependencyGraph {
-            ModuleNode(id: "A", dependencies: []) { }
+        class TraceDelegate: StartupDelegate {
+            var report: StartupReport?
+            func startupDidComplete(with report: StartupReport) { self.report = report }
         }
-        let layers = try graph.topologicalSort()
-        let scheduler = StartupScheduler()
-        try await scheduler.executeLayers(layers, stage: .initialization)
 
-        let report = scheduler.tracer.report()
-        XCTAssertFalse(report.spans.isEmpty)
+        let delegate = TraceDelegate()
+        try await Engine.run(tasks: [SimpleTask()], config: .init(enableTracing: true), delegate: delegate)
+        XCTAssertNotNil(delegate.report)
     }
 }

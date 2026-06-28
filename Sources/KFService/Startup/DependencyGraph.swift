@@ -12,12 +12,6 @@ extension ModuleID: ExpressibleByStringLiteral {
     public init(stringLiteral value: String) { self.rawValue = value }
 }
 
-extension ModuleID {
-    public init(_ type: ModuleProtocol.Type) {
-        self.rawValue = "\(type)"
-    }
-}
-
 // MARK: - ActorRequirement
 
 /// 三态 Actor 隔离声明。
@@ -36,7 +30,7 @@ public enum ActorRequirement: Sendable, Equatable {
 public struct ModuleNode: Sendable {
     public let id: ModuleID
     public let dependencies: [ModuleID]
-    public let factory: @Sendable () async -> Void
+    public let factory: @Sendable () async throws -> Void
     public let priority: Int
     public let actorRequirement: ActorRequirement
     public let maxExecTime: TimeInterval?
@@ -47,7 +41,7 @@ public struct ModuleNode: Sendable {
         priority: Int = 100,
         actorRequirement: ActorRequirement = .automatic,
         maxExecTime: TimeInterval? = nil,
-        factory: @escaping @Sendable () async -> Void
+        factory: @escaping @Sendable () async throws -> Void
     ) {
         self.id = id
         self.dependencies = dependencies
@@ -103,7 +97,12 @@ public struct DependencyGraph: Sendable {
                     component.append(stack.removeLast())
                     onStack.remove(top)
                 }
-                if component.count > 1 { cycles.append(component) }
+                if component.count > 1 {
+                    cycles.append(component)
+                } else if component.count == 1, let id = component.first,
+                          nodes.first(where: { $0.id == id })?.dependencies.contains(id) == true {
+                    cycles.append(component) // self-cycle
+                }
             }
         }
 
